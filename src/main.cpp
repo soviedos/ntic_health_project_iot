@@ -1,17 +1,19 @@
-#include <Arduino.h>
-#include <AzureIoTHub.h>
-#include "WiFi101.h" // WiFi library for ESP8266 node
+#include <Arduino.h> // Library for Arduino compatibility
+#include <AzureIoTHub.h> // Library for Azure IoT Hub
+#include "WiFi101.h" // Library for WiFi module
 #include "credentials.h"  // WiFi Router credentials
 #include <time.h>
+#include <sys/time.h>
 #include <SPI.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <Adafruit_GFX.h> // Graphics core library
+#include <Adafruit_SSD1306.h> // Library for Monochrome OLEDs display
 #include <DHT.h>
 #include <DHT_U.h>
-#include <ArduinoJson.h>
+#include <ArduinoJson.h> // JSON library for Arduino and IoT
 #include <AzureIoTProtocol_HTTP.h>
 #include <NTPClient.h>
+#include "config.h"
 
 // Display instance
 Adafruit_SSD1306 display = Adafruit_SSD1306(128, 32, &Wire);
@@ -31,7 +33,7 @@ char server[] = "www.google.com";    // name address for Google (using DNS)
 long rssi;
 
 // WiFi Instance
-WiFiSSLClient client;
+WiFiSSLClient client; // WiFi connection with SSL
 
 // Configuring network parameters
 IPAddress ip(192,168,0,5);
@@ -50,9 +52,10 @@ const char* connectionString = CONN_STRING;
 // Sensor instance
 DHT_Unified dht(DHTPIN, DHTTYPE);
 
-// Configuring battery measurin pin
+// Configuring battery measuring pin
 #define VBATPIN A7
 
+/////////////// Sub Routine to measure battery voltage ///////////////
 void batteryMeasure() {
     float measuredvbat = analogRead(VBATPIN);
     measuredvbat *= 2;    // we divided by 2, so multiply back
@@ -65,6 +68,7 @@ void batteryMeasure() {
     display.display();
 }
 
+/////////////// Sub Routine to print WiFi data ///////////////
 void printWiFiStatus() {
   // print the SSID of the network you're attached to:
   Serial.print("SSID: ");
@@ -102,16 +106,54 @@ void printWiFiStatus() {
   display.display();
 }
 
+/////////////// Sub Routine for the batteryMeasure and printWiFiStatus interruption ///////////////
 void interruption() {
   if (!digitalRead(BUTTON_B)) printWiFiStatus();
   if (!digitalRead(BUTTON_C)) batteryMeasure();
   delay(2000);
 }
 
+/////////////// Sub Routine for initialization of DTH 11 sensor ///////////////
 void initSensor() {
   dht.begin();
 }
 
+/////////////// Sub Routine for time syncronization ///////////////
+void initTime()
+{
+    WiFiUDP _udp;
+
+    time_t epochTime = (time_t)-1;
+
+    NTPClient ntpClient;
+    ntpClient.begin();
+
+    while (true)
+    {
+        epochTime = ntpClient.getEpochTime("pool.ntp.org");
+
+        if (epochTime == (time_t)-1)
+        {
+            LogInfo("Fetching NTP epoch time failed! Waiting 2 seconds to retry.");
+            delay(2000);
+        }
+        else
+        {
+            LogInfo("Fetched NTP epoch time is: %lu", epochTime);
+            break;
+        }
+    }
+
+    ntpClient.end();
+
+    struct timeval tv;
+    tv.tv_sec = epochTime;
+    tv.tv_usec = 0;
+
+    settimeofday(&tv, NULL);
+}
+
+/////////////// Sub Routine for temperature reading ///////////////
 void readTemperature()
 {
   interruption();
@@ -136,6 +178,7 @@ void readTemperature()
     }
 }
 
+/////////////// Sub Routine for humidity reading ///////////////
 void readHumidity()
 {
   interruption();
@@ -160,18 +203,121 @@ void readHumidity()
     }
 }
 
+bool readMessage(int messageId, char *payload)
+{
+    float temperature = readTemperature();
+    float humidity = readHumidity();
+    StaticJsonBuffer<MESSAGE_MAX_LEN> jsonBuffer;
+    JsonObject &root = jsonBuffer.createObject();
+    root["deviceId"] = DEVICE_ID;
+    root["messageId"] = messageId;
+    bool result = false;
+
+    // NAN is not the valid json, change it to NULL
+    if (std::isnan(temperature))
+    {
+        root["temperature"] = NULL;
+    }
+    else
+    {
+        root["temperature"] = temperature;
+        if(temperature > TEMPERATURE_ALERT)
+        {
+            result = true;
+        }
+    }
+
+    if (std::isnan(humidity))
+    {
+        root["humidity"] = NULL;
+    }
+    else
+    {
+        root["humidity"] = humidity;
+    }
+    //root.printTo(payload, MESSAGE_MAX_LEN);
+    return result;
+}
+
+////////////////////////////// Connection with Azure IoT //////////////////////////////
+static void sendCallback(IOTHUB_CLIENT_CONFIRMATION_RESULT result, void *userContextCallback)
+{
+    if (IOTHUB_CLIENT_CONFIRMATION_OK == result)
+    {
+        LogInfo("Message sent to Azure IoT Hub");
+    }
+    else
+    {
+        LogInfo("Failed to send message to Azure IoT Hub");
+    }
+    messagePending = false;
+}
+
+static void sendMessage(IOTHUB_CLIENT_LL_HANDLE iotHubClientHandle, char *buffer, bool temperatureAlert)
+{
+    IOTHUB_MESSAGE_HANDLE messageHandle = IoTHubMessage_CreateFromByteArray((const unsigned char *)buffer, strlen(buffer));
+    if (messageHandle == NULL)
+    {
+        LogInfo("unable to create a new IoTHubMessage");
+    }
+    else
+    {
+        MAP_HANDLE properties = IoTHubMessage_Properties(messageHandle);
+        Map_Add(properties, "temperatureAlert", temperatureAlert ? "true" : "false");
+        LogInfo("Sending message: %s", buffer);
+        if (IoTHubClient_LL_SendEventAsync(iotHubClientHandle, messageHandle, sendCallback, NULL) != IOTHUB_CLIENT_OK)
+        {
+            LogInfo("Failed to hand over the message to IoTHubClient");
+        }
+        else
+        {
+            messagePending = true;
+            LogInfo("IoTHubClient accepted the message for delivery");
+        }
+
+        IoTHubMessage_Destroy(messageHandle);
+    }
+}
+
+IOTHUBMESSAGE_DISPOSITION_RESULT receiveMessageCallback(IOTHUB_MESSAGE_HANDLE message, void *userContextCallback)
+{
+    IOTHUBMESSAGE_DISPOSITION_RESULT result;
+    const unsigned char *buffer;
+    size_t size;
+    if (IoTHubMessage_GetByteArray(message, &buffer, &size) != IOTHUB_MESSAGE_OK)
+    {
+        LogInfo("unable to IoTHubMessage_GetByteArray\r\n");
+        result = IOTHUBMESSAGE_REJECTED;
+    }
+    else
+    {
+        /*buffer is not zero terminated*/
+        char temp[size + 1];
+        memcpy(temp, buffer, size);
+        temp[size] = '\0';
+        LogInfo("Receiving message: %s", temp);
+        result = IOTHUBMESSAGE_ACCEPTED;
+    }
+
+    return result;
+}
+////////////////////////////// End of Azure IoT connection Sub Routine//////////////////////////////
+
+static IOTHUB_CLIENT_LL_HANDLE iotHubClientHandle;
+
 // the setup function runs once when you press reset or power the board
 void setup() {
 
     //Configure pins for Adafruit ATWINC1500 Feather
     WiFi.setPins(8,7,4,2);
 
+    // Serial Port initialization
     Serial.begin(115200); // Init Serial Connection
 
-    // Init DHT_11 sensor
+    // Initialization for DHT_11 sensor
     initSensor();
     
-    // Init Display
+    // Display initialization
     display.begin(SSD1306_SWITCHCAPVCC, 0x3C); // Address 0x3C for 128x32
     display.display();
     delay(2000);
@@ -205,10 +351,45 @@ void setup() {
     // Show WiFi Status
     printWiFiStatus();
     delay(2000);
+
+    initTime();
+
+    iotHubClientHandle = IoTHubClient_LL_CreateFromConnectionString(connectionString, HTTP_Protocol);
+    if (iotHubClientHandle == NULL)
+    {
+        LogInfo("Failed on IoTHubClient_CreateFromConnectionString");
+        while (1);
+    }
+
+    // Because it can poll "after 2 seconds" polls will happen
+    // effectively at ~3 seconds.
+    // Note that for scalabilty, the default value of minimumPollingTime
+    // is 25 minutes. For more information, see:
+    // https://azure.microsoft.com/documentation/articles/iot-hub-devguide/#messaging
+    int minimumPollingTime = 2;
+    if (IoTHubClient_LL_SetOption(iotHubClientHandle, "MinimumPollingTime", &minimumPollingTime) != IOTHUB_CLIENT_OK)
+    {
+        LogInfo("failure to set option \"MinimumPollingTime\"\r\n");
+    }
+
+    IoTHubClient_LL_SetOption(iotHubClientHandle, "product_info", "HappyPath_FeatherM0WiFi-C");
+    IoTHubClient_LL_SetMessageCallback(iotHubClientHandle, receiveMessageCallback, NULL);
 }
+
+int messageCount = 1;
 
 // the loop function runs over and over again until power down or reset
 void loop() {
-  readTemperature();
-  readHumidity();
+  readTemperature(); // Calls temperature reading sub routine
+  readHumidity(); // Calls humidity reading sub routine
+
+  if (!messagePending)
+    {
+        char messagePayload[MESSAGE_MAX_LEN];
+        bool temperatureAlert = readMessage(messageCount, messagePayload);
+        sendMessage(iotHubClientHandle, messagePayload, temperatureAlert);
+        messageCount++;
+        delay(INTERVAL);
+    }
+    IoTHubClient_LL_DoWork(iotHubClientHandle);
 }
