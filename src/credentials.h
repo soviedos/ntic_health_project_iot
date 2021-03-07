@@ -1,3 +1,6 @@
 #define SECRET_SSID "TNT3"
 #define SECRET_PASS "DFGHMNBVZX"
 #define CONN_STRING "HostName=NTicSolution.azure-devices.net;DeviceId=M0;SharedAccessKey=5O+PsmbbLt9zuo4Xb8yci3NfvOpr+SxJpT6Bl/m6Ouo="
+#define CLIENT_ID "M0"
+#define USERNAME "NTicSolution.azure-devices.net/M0/?api-version=2018-06-30" 
+#define PASSWORD "SharedAccessSignature sr=NTicSolution.azure-devices.net%2Fdevices%2FM0&sig=MUXmAHSr2Q0gGSd7eZYtdiBzt5xQZTDjhhHEzBCjvAA%3D&se=1644550052"

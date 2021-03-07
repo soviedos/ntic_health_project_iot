@@ -118,41 +118,6 @@ void initSensor() {
   dht.begin();
 }
 
-/////////////// Sub Routine for time syncronization ///////////////
-void initTime()
-{
-    WiFiUDP _udp;
-
-    time_t epochTime = (time_t)-1;
-
-    NTPClient ntpClient;
-    ntpClient.begin();
-
-    while (true)
-    {
-        epochTime = ntpClient.getEpochTime("pool.ntp.org");
-
-        if (epochTime == (time_t)-1)
-        {
-            LogInfo("Fetching NTP epoch time failed! Waiting 2 seconds to retry.");
-            delay(2000);
-        }
-        else
-        {
-            LogInfo("Fetched NTP epoch time is: %lu", epochTime);
-            break;
-        }
-    }
-
-    ntpClient.end();
-
-    struct timeval tv;
-    tv.tv_sec = epochTime;
-    tv.tv_usec = 0;
-
-    settimeofday(&tv, NULL);
-}
-
 /////////////// Sub Routine for temperature reading ///////////////
 void readTemperature()
 {
@@ -203,107 +168,6 @@ void readHumidity()
     }
 }
 
-bool readMessage(int messageId, char *payload)
-{
-    float temperature = readTemperature();
-    float humidity = readHumidity();
-    StaticJsonBuffer<MESSAGE_MAX_LEN> jsonBuffer;
-    JsonObject &root = jsonBuffer.createObject();
-    root["deviceId"] = DEVICE_ID;
-    root["messageId"] = messageId;
-    bool result = false;
-
-    // NAN is not the valid json, change it to NULL
-    if (std::isnan(temperature))
-    {
-        root["temperature"] = NULL;
-    }
-    else
-    {
-        root["temperature"] = temperature;
-        if(temperature > TEMPERATURE_ALERT)
-        {
-            result = true;
-        }
-    }
-
-    if (std::isnan(humidity))
-    {
-        root["humidity"] = NULL;
-    }
-    else
-    {
-        root["humidity"] = humidity;
-    }
-    //root.printTo(payload, MESSAGE_MAX_LEN);
-    return result;
-}
-
-////////////////////////////// Connection with Azure IoT //////////////////////////////
-static void sendCallback(IOTHUB_CLIENT_CONFIRMATION_RESULT result, void *userContextCallback)
-{
-    if (IOTHUB_CLIENT_CONFIRMATION_OK == result)
-    {
-        LogInfo("Message sent to Azure IoT Hub");
-    }
-    else
-    {
-        LogInfo("Failed to send message to Azure IoT Hub");
-    }
-    messagePending = false;
-}
-
-static void sendMessage(IOTHUB_CLIENT_LL_HANDLE iotHubClientHandle, char *buffer, bool temperatureAlert)
-{
-    IOTHUB_MESSAGE_HANDLE messageHandle = IoTHubMessage_CreateFromByteArray((const unsigned char *)buffer, strlen(buffer));
-    if (messageHandle == NULL)
-    {
-        LogInfo("unable to create a new IoTHubMessage");
-    }
-    else
-    {
-        MAP_HANDLE properties = IoTHubMessage_Properties(messageHandle);
-        Map_Add(properties, "temperatureAlert", temperatureAlert ? "true" : "false");
-        LogInfo("Sending message: %s", buffer);
-        if (IoTHubClient_LL_SendEventAsync(iotHubClientHandle, messageHandle, sendCallback, NULL) != IOTHUB_CLIENT_OK)
-        {
-            LogInfo("Failed to hand over the message to IoTHubClient");
-        }
-        else
-        {
-            messagePending = true;
-            LogInfo("IoTHubClient accepted the message for delivery");
-        }
-
-        IoTHubMessage_Destroy(messageHandle);
-    }
-}
-
-IOTHUBMESSAGE_DISPOSITION_RESULT receiveMessageCallback(IOTHUB_MESSAGE_HANDLE message, void *userContextCallback)
-{
-    IOTHUBMESSAGE_DISPOSITION_RESULT result;
-    const unsigned char *buffer;
-    size_t size;
-    if (IoTHubMessage_GetByteArray(message, &buffer, &size) != IOTHUB_MESSAGE_OK)
-    {
-        LogInfo("unable to IoTHubMessage_GetByteArray\r\n");
-        result = IOTHUBMESSAGE_REJECTED;
-    }
-    else
-    {
-        /*buffer is not zero terminated*/
-        char temp[size + 1];
-        memcpy(temp, buffer, size);
-        temp[size] = '\0';
-        LogInfo("Receiving message: %s", temp);
-        result = IOTHUBMESSAGE_ACCEPTED;
-    }
-
-    return result;
-}
-////////////////////////////// End of Azure IoT connection Sub Routine//////////////////////////////
-
-static IOTHUB_CLIENT_LL_HANDLE iotHubClientHandle;
 
 // the setup function runs once when you press reset or power the board
 void setup() {
@@ -352,44 +216,14 @@ void setup() {
     printWiFiStatus();
     delay(2000);
 
-    initTime();
 
-    iotHubClientHandle = IoTHubClient_LL_CreateFromConnectionString(connectionString, HTTP_Protocol);
-    if (iotHubClientHandle == NULL)
-    {
-        LogInfo("Failed on IoTHubClient_CreateFromConnectionString");
-        while (1);
-    }
-
-    // Because it can poll "after 2 seconds" polls will happen
-    // effectively at ~3 seconds.
-    // Note that for scalabilty, the default value of minimumPollingTime
-    // is 25 minutes. For more information, see:
-    // https://azure.microsoft.com/documentation/articles/iot-hub-devguide/#messaging
-    int minimumPollingTime = 2;
-    if (IoTHubClient_LL_SetOption(iotHubClientHandle, "MinimumPollingTime", &minimumPollingTime) != IOTHUB_CLIENT_OK)
-    {
-        LogInfo("failure to set option \"MinimumPollingTime\"\r\n");
-    }
-
-    IoTHubClient_LL_SetOption(iotHubClientHandle, "product_info", "HappyPath_FeatherM0WiFi-C");
-    IoTHubClient_LL_SetMessageCallback(iotHubClientHandle, receiveMessageCallback, NULL);
 }
 
-int messageCount = 1;
 
 // the loop function runs over and over again until power down or reset
 void loop() {
+    
   readTemperature(); // Calls temperature reading sub routine
   readHumidity(); // Calls humidity reading sub routine
 
-  if (!messagePending)
-    {
-        char messagePayload[MESSAGE_MAX_LEN];
-        bool temperatureAlert = readMessage(messageCount, messagePayload);
-        sendMessage(iotHubClientHandle, messagePayload, temperatureAlert);
-        messageCount++;
-        delay(INTERVAL);
-    }
-    IoTHubClient_LL_DoWork(iotHubClientHandle);
 }
